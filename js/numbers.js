@@ -37,5 +37,6 @@ export function parseNumbers(transcript) {
 // against "seven". [unk] catches anything that isn't a number.
 export const GRAMMAR = JSON.stringify([
   ...Array.from({ length: 101 }, (_, n) => numberToWords(n)),
+  'a hundred', // 10 × 10
   '[unk]',
 ]);

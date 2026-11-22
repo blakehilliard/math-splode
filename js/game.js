@@ -1,5 +1,6 @@
 // Screens and round logic: menu -> round of 20 questions -> victory.
-import { OPERATIONS, getLevel } from './storage.js';
+import { OPERATIONS, getLevel, setLevel } from './storage.js';
+import { maxNumber, maxLevel } from './levels.js';
 import { modelReady, initMic, speak, stopSpeaking, listenForAnswer, cancelListening } from './speech.js';
 
 const QUESTIONS_PER_ROUND = 20;
@@ -15,14 +16,12 @@ const $ = sel => document.querySelector(sel);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------- Questions ----------
-function allQuestions(op) {
+// Every problem whose numbers are all between 0 and max.
+function allQuestions(op, max) {
   const qs = [];
-  if (op === 'subtraction') {
-    // Every number (both operands and the answer) stays within 0–20.
-    for (let a = 0; a <= 20; a++) for (let b = 0; b <= a; b++) qs.push({ a, b });
-  } else {
-    // Single digits only.
-    for (let a = 0; a <= 9; a++) for (let b = 0; b <= 9; b++) qs.push({ a, b });
+  for (let a = 0; a <= max; a++) {
+    // Subtraction: b <= a, so the answer is never negative.
+    for (let b = 0; b <= (op === 'subtraction' ? a : max); b++) qs.push({ a, b });
   }
   return qs.map(q => ({ ...q, answer: OPS[op].calc(q.a, q.b) }));
 }
@@ -35,7 +34,12 @@ function shuffle(arr) {
   return arr;
 }
 
-const pickRound = op => shuffle(allQuestions(op)).slice(0, QUESTIONS_PER_ROUND);
+// Up to 20 different questions. Low levels have fewer possible problems (e.g. 4 at addition
+// level 1: 0+0, 0+1, 1+0, 1+1), so those rounds are shorter instead of repeating questions.
+const pickRound = (op, level) =>
+  shuffle(allQuestions(op, maxNumber(op, level))).slice(0, QUESTIONS_PER_ROUND);
+
+const levelText = (op, level) => `Level ${level} / ${maxLevel(op)}`;
 const questionText = (op, q) => `${q.a} ${OPS[op].symbol} ${q.b}`;
 const questionSpoken = (op, q) => `${q.a} ${OPS[op].word} ${q.b}`;
 
@@ -57,7 +61,7 @@ function renderMenu() {
     btn.className = `op-btn op-${op}`;
     btn.innerHTML = `<span class="op-symbol">${OPS[op].symbol}</span>` +
       `<span class="op-name">${OPS[op].label}</span>` +
-      `<span class="op-level">Level ${getLevel(op)}</span>`;
+      `<span class="op-level">${levelText(op, getLevel(op))}</span>`;
     btn.addEventListener('click', () => startRound(op));
     box.appendChild(btn);
   }
@@ -102,8 +106,9 @@ function stopCountdown() {
 
 async function startRound(op) {
   stopRound();
-  const r = round = { op, queue: pickRound(op), misses: 0, startedAt: 0, clock: null, countdownStart: null, over: false };
-  $('#playTitle').textContent = OPS[op].label;
+  const level = getLevel(op);
+  const r = round = { op, level, queue: pickRound(op, level), misses: 0, startedAt: 0, clock: null, countdownStart: null, over: false };
+  $('#playTitle').textContent = `${OPS[op].label} · ${levelText(op, level)}`;
   $('#question').textContent = '';
   $('#clock').textContent = '0:00';
   $('#countdownFill').style.width = '100%';
@@ -178,9 +183,26 @@ function stopRound() {
 function showVictory(r, elapsed) {
   $('#victoryTime').textContent = formatTime(elapsed);
   $('#victoryMisses').textContent = r.misses === 0 ? 'No mistakes!' : `${r.misses} mistake${r.misses === 1 ? '' : 's'}`;
+
+  // A perfect round levels you up, until the top level.
+  const top = maxLevel(r.op);
+  let levelMsg, spoken = 'Victory!';
+  if (r.misses > 0) {
+    levelMsg = `Still ${levelText(r.op, r.level)}. Get every question right to level up!`;
+  } else if (r.level < top) {
+    const next = r.level + 1;
+    setLevel(r.op, next);
+    levelMsg = `⭐ LEVEL UP! You're now ${levelText(r.op, next)} ⭐`;
+    spoken = `Victory! Level up! You're now level ${next}.`;
+  } else {
+    levelMsg = `🏆 You're at the top level: ${levelText(r.op, r.level)}!`;
+  }
+  $('#victoryLevel').textContent = levelMsg;
+  $('#victoryLevel').classList.toggle('levelup', r.misses === 0 && r.level < top);
+
   $('#againBtn').onclick = () => startRound(r.op);
   show('victory');
-  speak('Victory!');
+  speak(spoken);
 }
 
 $('#quitBtn').addEventListener('click', () => { stopRound(); renderMenu(); });

@@ -1,4 +1,5 @@
 // Player progress, stored in this browser only (localStorage). No accounts or server.
+import { maxLevel } from './levels.js';
 
 const KEY = 'mathsplode.v1';
 export const OPERATIONS = ['addition', 'subtraction', 'multiplication'];
@@ -14,7 +15,7 @@ function load() {
     if (saved && saved.levels) {
       for (const op of OPERATIONS) {
         const lvl = Number(saved.levels[op]);
-        if (Number.isInteger(lvl) && lvl >= 1) data.levels[op] = lvl;
+        if (Number.isInteger(lvl) && lvl >= 1) data.levels[op] = Math.min(lvl, maxLevel(op));
       }
     }
   } catch { /* storage blocked or corrupt: fall back to defaults */ }
@@ -31,6 +32,6 @@ export function getLevel(op) {
 
 export function setLevel(op, level) {
   const data = load();
-  data.levels[op] = level;
+  data.levels[op] = Math.max(1, Math.min(level, maxLevel(op)));
   save(data);
 }
