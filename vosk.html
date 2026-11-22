@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Math-splode Vosk Test</title>
+<style>
+  :root { --bg:#eef6ff; --fg:#222; --card:#fff; --accent:#2c7bff; --ok:#1f9d55; --bad:#d64545; --muted:#777; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 1.6rem; }
+  .sub { margin: 0 0 12px; color: var(--muted); }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:0 1px 4px rgba(0,0,0,.1); }
+  #problem { font-size: 3rem; font-weight: 700; text-align:center; margin: 8px 0; }
+  #status { text-align:center; font-size:1.2rem; min-height:1.5em; }
+  #heard { text-align:center; font-size:1.4rem; min-height:1.5em; color:var(--muted); }
+  #verdict { text-align:center; font-size:2rem; font-weight:700; min-height:1.3em; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  button { font-size:1.2rem; padding:14px 22px; border:none; border-radius:10px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.secondary { background:#555; }
+  button:disabled { opacity:.4; }
+  label { display:block; margin:8px 0 4px; }
+  select, input[type=range] { width:100%; font-size:1rem; }
+  #meter { height:10px; background:#ddd; border-radius:5px; overflow:hidden; margin-top:10px; }
+  #meterFill { height:100%; width:0; background:var(--ok); transition: width .08s; }
+  #log { font-family: ui-monospace, monospace; font-size:.8rem; white-space:pre-wrap; max-height:240px; overflow:auto; background:#f3f3f3; padding:8px; border-radius:8px; }
+  #support { font-size:.9rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>💣 Math-splode speech test (Vosk)</h1>
+  <p class="sub">Offline speech recognition that runs in the page. Works without Google services. <a href="./">Built-in speech version</a></p>
+
+  <div class="card">
+    <div id="problem">?</div>
+    <div id="status">Loading speech model…</div>
+    <div id="heard"></div>
+    <div id="verdict"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="startBtn" disabled>Start</button>
+      <button id="listenBtn" class="secondary" disabled>Listen again</button>
+      <button id="speakBtn" class="secondary" disabled>Repeat question</button>
+    </div>
+    <div id="meter" title="Mic level"><div id="meterFill"></div></div>
+  </div>
+
+  <div class="card">
+    <label for="voice">Voice</label>
+    <select id="voice"></select>
+    <label for="rate">Speech rate: <span id="rateVal">1.0</span></label>
+    <input id="rate" type="range" min="0.6" max="1.6" step="0.1" value="1">
+    <label><input id="autoNext" type="checkbox" checked> Go to next problem automatically when correct</label>
+  </div>
+
+  <div class="card">
+    <div id="support"></div>
+    <div id="stats" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <strong>Log</strong>
+    <div id="log"></div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+function log(msg) {
+  const t = (performance.now() / 1000).toFixed(2);
+  logEl.textContent = `[${t}s] ${msg}\n` + logEl.textContent;
+}
+
+// ---------- Feature detection ----------
+const hasTTS = 'speechSynthesis' in window;
+const hasMic = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+const hasWasm = typeof WebAssembly === 'object';
+const yn = (v, no = 'NO') => `<b class="${v ? 'ok' : 'bad'}">${v ? 'yes' : no}</b>`;
+$('support').innerHTML =
+  `Text-to-speech: ${yn(hasTTS)} · Mic access: ${yn(hasMic)} · WebAssembly: ${yn(hasWasm)} · ` +
+  `Secure context: ${yn(isSecureContext, 'NO (mic needs HTTPS)')}`;
+
+// ---------- Problems ----------
+let current = null;
+function newProblem() {
+  const ops = ['+', '-', '×'];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a = 1 + Math.floor(Math.random() * 10);
+  let b = 1 + Math.floor(Math.random() * 10);
+  if (op === '-' && b > a) [a, b] = [b, a];
+  const answer = op === '+' ? a + b : op === '-' ? a - b : a * b;
+  const spoken = `${a} ${op === '+' ? 'plus' : op === '-' ? 'minus' : 'times'} ${b}?`;
+  return { a, b, op, answer, spoken, text: `${a} ${op} ${b}` };
+}
+
+// ---------- Text-to-speech ----------
+let voices = [];
+function loadVoices() {
+  voices = speechSynthesis.getVoices();
+  const sel = $('voice');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  voices.forEach((v, i) => {
+    if (!v.lang.toLowerCase().startsWith('en')) return;
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = `${v.name} (${v.lang})${v.localService ? '' : ' [online]'}`;
+    sel.appendChild(o);
+  });
+  if (prev) sel.value = prev;
+  log(`Loaded ${voices.length} voices`);
+}
+if (hasTTS) {
+  loadVoices();
+  speechSynthesis.addEventListener('voiceschanged', loadVoices);
+}
+$('rate').addEventListener('input', e => $('rateVal').textContent = Number(e.target.value).toFixed(1));
+
+function speak(text) {
+  return new Promise(resolve => {
+    if (!hasTTS) return resolve();
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voices[$('voice').value];
+    if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = 'en-US'; }
+    u.rate = Number($('rate').value);
+    let done = false;
+    const finish = why => { if (!done) { done = true; log(`TTS ended (${why})`); resolve(); } };
+    u.onend = () => finish('onend');
+    u.onerror = e => finish('error: ' + e.error);
+    setTimeout(() => finish('timeout fallback'), 6000);
+    speechSynthesis.speak(u);
+    log(`TTS: "${text}"`);
+  });
+}
+
+// ---------- Number parsing ----------
+const WORDS = {
+  zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10,
+  eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16, seventeen:17, eighteen:18, nineteen:19,
+};
+const TENS = { twenty:20, thirty:30, forty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90 };
+
+function parseNumbers(transcript) {
+  const found = new Set();
+  const tokens = transcript.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  let total = null;
+  const flush = () => { if (total !== null) found.add(total); total = null; };
+  for (const w of tokens) {
+    if (w in TENS) { flush(); total = TENS[w]; }
+    else if (w in WORDS) {
+      if (total !== null && total % 10 === 0 && total >= 20 && WORDS[w] < 10) total += WORDS[w];
+      else { flush(); total = WORDS[w]; }
+    }
+    else if (w === 'hundred') { total = (total ?? 1) * 100; }
+    else if (w === 'and' && total !== null && total >= 100) { /* "one hundred and five" */ }
+    else flush();
+  }
+  flush();
+  return [...found];
+}
+
+// Restricting Vosk to these words is what makes it accurate for this game:
+// it can only ever "hear" a number word (or [unk] for anything else).
+// Each number 0–100 is its own whole phrase, so the decoder weighs "seventy" as one
+// unit against "seven" instead of stitching numbers together word by word.
+function numberToWords(n) {
+  const ones = Object.keys(WORDS), tens = Object.keys(TENS);
+  if (n < 20) return ones[n];
+  if (n === 100) return 'one hundred';
+  const t = tens[Math.floor(n / 10) - 2], u = n % 10;
+  return u ? `${t} ${ones[u]}` : t;
+}
+const GRAMMAR = JSON.stringify([
+  ...Array.from({ length: 101 }, (_, n) => numberToWords(n)),
+  '[unk]',
+]);
+
+// ---------- Vosk setup ----------
+const MODEL_URL = new URL('models/vosk-model-small-en-us-0.15.tar.gz', location.href).href;
+let model = null, recognizer = null, audioCtx = null, mediaStream = null;
+let listening = false, listenTimer = null, lastPartialAt = 0, listenStartedAt = 0;
+// A wrong-looking answer is only judged after this much quiet, in case the kid is still talking
+// (e.g. Vosk finalizes "seven" before the "-ty" of "seventy" arrives).
+const SETTLE_MS = 1000;
+const VOICE_PEAK = 0.05; // mic level that counts as "still talking"
+let lastVoiceAt = 0, settleTimer = null, heardSegments = [];
+
+const modelLoadStart = performance.now();
+const modelReady = (typeof Vosk === 'undefined')
+  ? Promise.reject(new Error('vosk.js failed to load'))
+  : Vosk.createModel(MODEL_URL);
+modelReady.then(m => {
+  model = m;
+  const secs = ((performance.now() - modelLoadStart) / 1000).toFixed(1);
+  log(`Model loaded in ${secs}s`);
+  $('status').textContent = `Model ready (loaded in ${secs}s). Tap Start.`;
+  $('startBtn').disabled = false;
+}).catch(err => {
+  log('Model load failed: ' + (err && err.message || err));
+  $('status').textContent = 'Could not load the speech model. See log.';
+});
+
+async function setupAudio() {
+  if (audioCtx) { await audioCtx.resume(); return; }
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    video: false,
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+  });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  log(`Mic on, sample rate ${audioCtx.sampleRate} Hz`);
+
+  recognizer = new model.KaldiRecognizer(audioCtx.sampleRate, GRAMMAR);
+  recognizer.on('partialresult', msg => {
+    if (!listening) return;
+    const p = msg.result.partial;
+    if (p) { lastPartialAt = performance.now(); $('heard').textContent = `Hearing: "${p}"`; }
+  });
+  recognizer.on('result', msg => {
+    if (!listening) return;
+    // Ignore results arriving right after listening starts: they're leftovers flushed from the last round.
+    if (performance.now() - listenStartedAt < 400) return;
+    const text = (msg.result.text || '').trim();
+    if (!text) return; // silence-only segment, keep listening
+    handleSegment(text);
+  });
+  recognizer.on('error', msg => log('Recognizer error: ' + msg.error));
+
+  // ScriptProcessor is deprecated but supported everywhere, including older tablets.
+  const node = audioCtx.createScriptProcessor(4096, 1, 1);
+  node.onaudioprocess = e => {
+    const data = e.inputBuffer.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < data.length; i += 16) peak = Math.max(peak, Math.abs(data[i]));
+    $('meterFill').style.width = (listening ? Math.min(100, peak * 300) : 0) + '%';
+    if (listening && peak > VOICE_PEAK) lastVoiceAt = performance.now();
+    // Only feed the recognizer while listening, so it never hears the TTS voice.
+    if (listening) {
+      try { recognizer.acceptWaveform(e.inputBuffer); } catch (err) { log('acceptWaveform failed: ' + err); }
+    }
+  };
+  const src = audioCtx.createMediaStreamSource(mediaStream);
+  src.connect(node);
+  // Some browsers only run ScriptProcessor when it is connected to an output (it outputs silence).
+  node.connect(audioCtx.destination);
+}
+
+// ---------- Listening ----------
+const stats = { tries: 0, correct: 0, latencies: [] };
+function showStats() {
+  const avg = stats.latencies.length
+    ? (stats.latencies.reduce((a, b) => a + b, 0) / stats.latencies.length).toFixed(0) + ' ms' : '–';
+  $('stats').textContent = `Recognized correctly: ${stats.correct}/${stats.tries} · Avg delay after you stop talking: ${avg}`;
+}
+
+function listen() {
+  stopListening();
+  lastPartialAt = 0;
+  lastVoiceAt = 0;
+  heardSegments = [];
+  listenStartedAt = performance.now();
+  listening = true;
+  $('status').textContent = '🎤 Listening… say the answer';
+  log('Listening');
+  listenTimer = setTimeout(() => {
+    if (!listening) return;
+    if (heardSegments.length) { judgeWrong(); return; }
+    stopListening();
+    log('Listen timeout');
+    $('status').textContent = `Didn't hear an answer. Tap "Listen again".`;
+  }, 10000);
+}
+function stopListening() {
+  listening = false;
+  clearTimeout(listenTimer);
+  clearTimeout(settleTimer);
+  $('meterFill').style.width = '0%';
+  // Flush anything buffered so leftover audio doesn't leak into the next problem.
+  if (recognizer) recognizer.retrieveFinalResult();
+}
+
+// Vosk can split one answer into several final segments. A correct segment wins right away;
+// anything else waits until the kid has been quiet for SETTLE_MS before being marked wrong.
+function handleSegment(text) {
+  // Approximate delay: last partial update (≈ when speech was still being heard) to final result.
+  const latency = lastPartialAt ? Math.round(performance.now() - lastPartialAt) : null;
+  const parsed = parseNumbers(text);
+  log(`Segment: "${text}" → numbers ${JSON.stringify(parsed)}` + (latency !== null ? ` (${latency} ms)` : ''));
+  heardSegments.push(text);
+  $('heard').textContent = `Heard: "${heardSegments.join(' … ')}"`;
+
+  if (parsed.includes(current.answer)) {
+    stopListening();
+    stats.tries++;
+    stats.correct++;
+    if (latency !== null) stats.latencies.push(latency);
+    $('verdict').innerHTML = `<span class="ok">✅ ${current.answer}! Correct</span>`;
+    $('status').textContent = '';
+    if ($('autoNext').checked) setTimeout(nextProblem, 1200);
+    showStats();
+    return;
+  }
+  // [unk] means part of what was said didn't match any number (e.g. "seven [unk]" for a
+  // mumbled "seventy"). Don't call that wrong; keep listening so they can say it again.
+  if (text.includes('[unk]')) {
+    $('status').textContent = `🎤 Didn't quite catch that… say it again`;
+    return;
+  }
+  scheduleSettle();
+}
+function scheduleSettle() {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    if (!listening) return;
+    const quietFor = performance.now() - Math.max(lastVoiceAt, lastPartialAt);
+    if (quietFor < SETTLE_MS) { scheduleSettle(); return; } // still talking, keep waiting
+    judgeWrong();
+  }, SETTLE_MS);
+}
+function judgeWrong() {
+  stopListening();
+  const parsed = [...new Set(heardSegments.flatMap(parseNumbers))];
+  log(`Judged wrong after quiet: ${JSON.stringify(heardSegments)}`);
+  stats.tries++;
+  $('verdict').innerHTML = parsed.length
+    ? `<span class="bad">❌ Got ${parsed.join(' / ')}</span>`
+    : `<span class="bad">🤔 Couldn't find a number</span>`;
+  $('status').textContent = `Answer was ${current.answer}. Tap "Listen again" to retry.`;
+  showStats();
+}
+
+// ---------- Flow ----------
+async function askCurrent() {
+  stopListening();
+  $('heard').textContent = '';
+  $('verdict').textContent = '';
+  $('status').textContent = '🔊 Listen…';
+  await speak(current.spoken);
+  listen();
+}
+function nextProblem() {
+  current = newProblem();
+  $('problem').textContent = current.text;
+  askCurrent();
+}
+
+$('startBtn').addEventListener('click', async () => {
+  try {
+    await setupAudio();
+  } catch (err) {
+    log('Mic setup failed: ' + (err && err.message || err));
+    $('status').textContent = 'Could not turn on the mic. See log.';
+    return;
+  }
+  $('startBtn').textContent = 'Next problem';
+  $('listenBtn').disabled = false;
+  $('speakBtn').disabled = false;
+  nextProblem();
+});
+$('listenBtn').addEventListener('click', () => { $('heard').textContent = ''; $('verdict').textContent = ''; listen(); });
+$('speakBtn').addEventListener('click', askCurrent);
+showStats();
+</script>
+</body>
+</html>
