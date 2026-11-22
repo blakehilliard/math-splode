@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Math-splode Speech Test</title>
+<style>
+  :root { --bg:#fff8ec; --fg:#222; --card:#fff; --accent:#ff6b2c; --ok:#1f9d55; --bad:#d64545; --muted:#777; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { margin: 0 0 12px; font-size: 1.6rem; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:0 1px 4px rgba(0,0,0,.1); }
+  #problem { font-size: 3rem; font-weight: 700; text-align:center; margin: 8px 0; }
+  #status { text-align:center; font-size:1.2rem; min-height:1.5em; }
+  #heard { text-align:center; font-size:1.4rem; min-height:1.5em; color:var(--muted); }
+  #verdict { text-align:center; font-size:2rem; font-weight:700; min-height:1.3em; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  button { font-size:1.2rem; padding:14px 22px; border:none; border-radius:10px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.secondary { background:#555; }
+  button:disabled { opacity:.4; }
+  label { display:block; margin:8px 0 4px; }
+  select, input[type=range] { width:100%; font-size:1rem; }
+  #log { font-family: ui-monospace, monospace; font-size:.8rem; white-space:pre-wrap; max-height:240px; overflow:auto; background:#f3f3f3; padding:8px; border-radius:8px; }
+  #support { font-size:.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>💣 Math-splode speech test</h1>
+  <p>This version uses the browser's built-in speech recognition, which needs Google services on Android. <a href="./">Back to the offline (Vosk) version</a>.</p>
+
+  <div class="card">
+    <div id="problem">?</div>
+    <div id="status">Tap Start to hear a problem.</div>
+    <div id="heard"></div>
+    <div id="verdict"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="startBtn">Start</button>
+      <button id="listenBtn" class="secondary" disabled>Listen again</button>
+      <button id="speakBtn" class="secondary" disabled>Repeat question</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="voice">Voice</label>
+    <select id="voice"></select>
+    <label for="rate">Speech rate: <span id="rateVal">1.0</span></label>
+    <input id="rate" type="range" min="0.6" max="1.6" step="0.1" value="1">
+    <label><input id="autoNext" type="checkbox" checked> Go to next problem automatically when correct</label>
+  </div>
+
+  <div class="card">
+    <div id="support"></div>
+    <div id="stats" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <strong>Log</strong>
+    <div id="log"></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+function log(msg) {
+  const t = (performance.now() / 1000).toFixed(2);
+  logEl.textContent = `[${t}s] ${msg}\n` + logEl.textContent;
+}
+
+// ---------- Feature detection ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const hasTTS = 'speechSynthesis' in window;
+$('support').innerHTML =
+  `Text-to-speech: <b class="${hasTTS ? 'ok' : 'bad'}">${hasTTS ? 'yes' : 'NO'}</b> · ` +
+  `Speech recognition: <b class="${SR ? 'ok' : 'bad'}">${SR ? 'yes' : 'NO'}</b> · ` +
+  `Secure context: <b class="${isSecureContext ? 'ok' : 'bad'}">${isSecureContext ? 'yes' : 'NO (mic needs HTTPS)'}</b>`;
+
+// ---------- Problems ----------
+let current = null;
+function newProblem() {
+  const ops = ['+', '-', '×'];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a = 1 + Math.floor(Math.random() * 10);
+  let b = 1 + Math.floor(Math.random() * 10);
+  if (op === '-' && b > a) [a, b] = [b, a];
+  const answer = op === '+' ? a + b : op === '-' ? a - b : a * b;
+  const spoken = `${a} ${op === '+' ? 'plus' : op === '-' ? 'minus' : 'times'} ${b}?`;
+  return { a, b, op, answer, spoken, text: `${a} ${op} ${b}` };
+}
+
+// ---------- Text-to-speech ----------
+let voices = [];
+function loadVoices() {
+  voices = speechSynthesis.getVoices();
+  const sel = $('voice');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  voices.forEach((v, i) => {
+    if (!v.lang.toLowerCase().startsWith('en')) return;
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = `${v.name} (${v.lang})${v.localService ? '' : ' [online]'}`;
+    sel.appendChild(o);
+  });
+  if (prev) sel.value = prev;
+  log(`Loaded ${voices.length} voices`);
+}
+if (hasTTS) {
+  loadVoices();
+  speechSynthesis.addEventListener('voiceschanged', loadVoices);
+}
+$('rate').addEventListener('input', e => $('rateVal').textContent = Number(e.target.value).toFixed(1));
+
+function speak(text) {
+  return new Promise(resolve => {
+    if (!hasTTS) return resolve();
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voices[$('voice').value];
+    if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = 'en-US'; }
+    u.rate = Number($('rate').value);
+    let done = false;
+    const finish = why => { if (!done) { done = true; log(`TTS ended (${why})`); resolve(); } };
+    u.onend = () => finish('onend');
+    u.onerror = e => finish('error: ' + e.error);
+    // Android sometimes never fires onend; fall back after a generous timeout.
+    setTimeout(() => finish('timeout fallback'), 6000);
+    speechSynthesis.speak(u);
+    log(`TTS: "${text}"`);
+  });
+}
+
+// ---------- Number parsing ----------
+const WORDS = {
+  zero:0, oh:0, one:1, won:1, two:2, to:2, too:2, three:3, tree:3, four:4, for:4, fore:4,
+  five:5, six:6, seven:7, eight:8, ate:8, nine:9, ten:10, eleven:11, twelve:12,
+  thirteen:13, fourteen:14, fifteen:15, sixteen:16, seventeen:17, eighteen:18, nineteen:19,
+};
+const TENS = { twenty:20, thirty:30, forty:40, fourty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90 };
+
+// Returns every number we can plausibly read out of a transcript.
+function parseNumbers(transcript) {
+  const found = new Set();
+  const s = transcript.toLowerCase().replace(/-/g, ' ');
+  (s.match(/\d+/g) || []).forEach(d => found.add(Number(d)));
+  const tokens = s.split(/[^a-z]+/).filter(Boolean);
+  let total = null;
+  const flush = () => { if (total !== null) found.add(total); total = null; };
+  for (const w of tokens) {
+    if (w in TENS) { flush(); total = TENS[w]; }
+    else if (w in WORDS) {
+      if (total !== null && total % 10 === 0 && total >= 20 && WORDS[w] < 10) total += WORDS[w];
+      else { flush(); total = WORDS[w]; }
+    }
+    else if (w === 'hundred') { total = (total ?? 1) * 100; }
+    else if (w === 'and' && total !== null && total >= 100) { /* "one hundred and five" */ }
+    else flush();
+  }
+  flush();
+  return [...found];
+}
+
+// ---------- Speech recognition ----------
+let recognition = null;
+let listenStart = 0, speechEndAt = 0;
+const stats = { tries: 0, correct: 0, latencies: [] };
+function showStats() {
+  const avg = stats.latencies.length
+    ? (stats.latencies.reduce((a, b) => a + b, 0) / stats.latencies.length).toFixed(0) + ' ms' : '–';
+  $('stats').textContent = `Recognized correctly: ${stats.correct}/${stats.tries} · Avg delay after you stop talking: ${avg}`;
+}
+
+function listen() {
+  if (!SR) { $('status').textContent = 'Speech recognition not supported in this browser.'; return; }
+  if (recognition) recognition.abort();
+  recognition = new SR();
+  recognition.lang = 'en-US';
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 5;
+  recognition.continuous = false;
+  speechEndAt = 0;
+
+  recognition.onstart = () => { listenStart = performance.now(); $('status').textContent = '🎤 Listening… say the answer'; log('SR start'); };
+  recognition.onspeechend = () => { speechEndAt = performance.now(); log('SR speech end'); };
+  recognition.onresult = e => {
+    const res = e.results[e.results.length - 1];
+    const alts = [...res].map(a => a.transcript.trim());
+    $('heard').textContent = `Heard: "${alts[0]}"`;
+    if (!res.isFinal) return;
+
+    const latency = speechEndAt ? Math.round(performance.now() - speechEndAt) : null;
+    const parsed = [...new Set(alts.flatMap(parseNumbers))];
+    log(`SR final alts: ${JSON.stringify(alts)} → numbers ${JSON.stringify(parsed)}` + (latency !== null ? ` (${latency} ms)` : ''));
+    stats.tries++;
+    if (latency !== null) stats.latencies.push(latency);
+
+    if (parsed.includes(current.answer)) {
+      stats.correct++;
+      $('verdict').innerHTML = `<span class="ok">✅ ${current.answer}! Correct</span>`;
+      $('status').textContent = '';
+      if ($('autoNext').checked) setTimeout(nextProblem, 1200);
+    } else {
+      $('verdict').innerHTML = parsed.length
+        ? `<span class="bad">❌ Got ${parsed.join(' / ')}</span>`
+        : `<span class="bad">🤔 Couldn't find a number</span>`;
+      $('status').textContent = `Answer was ${current.answer}. Tap "Listen again" to retry.`;
+    }
+    showStats();
+  };
+  recognition.onerror = e => { log('SR error: ' + e.error); $('status').textContent = `Mic error: ${e.error}`; };
+  recognition.onend = () => log('SR end');
+  try { recognition.start(); } catch (err) { log('SR start failed: ' + err.message); }
+}
+
+// ---------- Flow ----------
+async function askCurrent() {
+  if (recognition) recognition.abort();
+  $('heard').textContent = '';
+  $('verdict').textContent = '';
+  $('status').textContent = '🔊 Listen…';
+  await speak(current.spoken);
+  listen();
+}
+function nextProblem() {
+  current = newProblem();
+  $('problem').textContent = current.text;
+  askCurrent();
+}
+
+$('startBtn').addEventListener('click', () => {
+  $('startBtn').textContent = 'Next problem';
+  $('listenBtn').disabled = false;
+  $('speakBtn').disabled = false;
+  nextProblem();
+});
+$('listenBtn').addEventListener('click', () => { $('heard').textContent = ''; $('verdict').textContent = ''; listen(); });
+$('speakBtn').addEventListener('click', askCurrent);
+showStats();
+</script>
+</body>
+</html>
